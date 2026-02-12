@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Bounce</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <style>
+        body {
+            background-color: #000;
+            margin: 0;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            user-select: none;
+        }
+        #game-container {
+            position: relative;
+            width: 512px;
+            height: 512px;
+        }
+        canvas {
+            width: 100%;
+            height: 100%;
+            image-rendering: pixelated;
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.2);
+        }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 0;
+            width: 100%;
+            display: flex;
+            justify-content: space-around;
+            pointer-events: none;
+            z-index: 10;
+        }
+        .score {
+            font-family: 'Press Start 2P', cursive;
+            font-size: 24px;
+            color: #fff;
+            text-shadow: 2px 2px #000;
+        }
+        #p1-score { color: #00E436; }
+        #p2-score { color: #FF004D; }
+        
+        #status-text {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-family: 'Press Start 2P', cursive;
+            color: #fff;
+            text-align: center;
+            width: 100%;
+            pointer-events: none;
+            line-height: 2;
+            text-shadow: 2px 2px #000;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <div id="ui">
+            <div id="p1-score" class="score">0</div>
+            <div id="p2-score" class="score">0</div>
+        </div>
+        <div id="status-text">
+            PRESS SPACE TO START<br>
+            ARROW KEYS TO MOVE
+        </div>
+    </div>
+    <script type="module">
+        import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+
+        const SCENE_WIDTH = 128;
+        const SCENE_HEIGHT = 128;
+        
+        const COLORS = {
+            neonGreen: 0x00E436,
+            neonPink: 0xFF004D,
+            neonBlue: 0x29ADFF,
+            white: 0xFFFFFF,
+            black: 0x000000
+        };
+
+        let scene, camera, renderer;
+        let paddle1, paddle2, ball, court;
+        let ballVel = new THREE.Vector3(0.4, 0, 0.4);
+        let p1Score = 0;
+        let p2Score = 0;
+        let gameActive = false;
+        let particles = [];
+        
+        const COURT_WIDTH = 80;
+        const COURT_LENGTH = 100;
+        const PADDLE_WIDTH = 16;
+        const PADDLE_DEPTH = 2;
+        const BALL_SIZE = 2;
+        const MAX_SCORE = 3;
+
+        const keys = { ArrowLeft: false, ArrowRight: false };
+
+        function init() {
+            const container = document.getElementById('game-container');
+            
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(COLORS.black);
+
+            camera = new THREE.PerspectiveCamera(60, 1, 0.1, 1000);
+            camera.position.set(0, 70, 60);
+            camera.lookAt(0, 0, 0);
+
+            renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+            renderer.setSize(SCENE_WIDTH, SCENE_HEIGHT, false);
+            container.appendChild(renderer.domElement);
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+            scene.add(ambientLight);
+            
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
+            dirLight.position.set(10, 20, 10);
+            scene.add(dirLight);
+
+            createCourt();
+            createPaddles();
+            createBall();
+
+            window.addEventListener('keydown', (e) => {
+                if(e.code === 'ArrowLeft') keys.ArrowLeft = true;
+                if(e.code === 'ArrowRight') keys.ArrowRight = true;
+                if(e.code === 'Space') {
+                    if (!gameActive && p1Score < MAX_SCORE && p2Score < MAX_SCORE) {
+                        startGame();
+                    } else if (p1Score >= MAX_SCORE || p2Score >= MAX_SCORE) {
+                        resetGame();
+                    }
+                }
+                if(e.code === 'Escape') {
+                    window.location.href = 'menu.html';
+                }
+            });
+            
+            window.addEventListener('keyup', (e) => {
+                if(e.code === 'ArrowLeft') keys.ArrowLeft = false;
+                if(e.code === 'ArrowRight') keys.ArrowRight = false;
+            });
+
+            renderer.setAnimationLoop(animate);
+        }
+
+        function createVoxelBox(width, height, depth, color) {
+            const geo = new THREE.BoxGeometry(1, 1, 1);
+            const mat = new THREE.MeshLambertMaterial({ color: color });
+            const group = new THREE.Group();
+
+            const startX = -width/2 + 0.5;
+            const startY = -height/2 + 0.5;
+            const startZ = -depth/2 + 0.5;
+
+            for(let x=0; x<width; x++) {
+                for(let y=0; y<height; y++) {
+                    for(let z=0; z<depth; z++) {
+                        const mesh = new THREE.Mesh(geo, mat);
+                        mesh.position.set(startX + x, startY + y, startZ + z);
+                        group.add(mesh);
+                    }
+                }
+            }
+            return group;
+        }
+
+        function createCourt() {
+            const geo = new THREE.BoxGeometry(1, 1, 4);
+            const mat = new THREE.MeshBasicMaterial({ color: 0x333333 });
+            
+            for(let z = -COURT_LENGTH/2; z < COURT_LENGTH/2; z += 8) {
+                const mesh = new THREE.Mesh(geo, mat);
+                mesh.position.set(0, -1, z);
+                scene.add(mesh);
+            }
+
+            const sideGeo = new THREE.BoxGeometry(1, 1, COURT_LENGTH);
+            const sideMat = new THREE.MeshBasicMaterial({ color: COLORS.neonBlue });
+            
+            const leftWall = new THREE.Mesh(sideGeo, sideMat);
+            leftWall.position.set(-COURT_WIDTH/2, 0, 0);
+            scene.add(leftWall);
+
+            const rightWall = new THREE.Mesh(sideGeo, sideMat);
+            rightWall.position.set(COURT_WIDTH/2, 0, 0);
+            scene.add(rightWall);
+        }
+
+        function createPaddles() {
+            paddle1 = createVoxelBox(PADDLE_WIDTH, 2, PADDLE_DEPTH, COLORS.neonGreen);
+            paddle1.position.set(0, 0, COURT_LENGTH/2 - 5);
+            scene.add(paddle1);
+
+            paddle2 = createVoxelBox(PADDLE_WIDTH, 2, PADDLE_DEPTH, COLORS.neonPink);
+            paddle2.position.set(0, 0, -COURT_LENGTH/2 + 5);
+            scene.add(paddle2);
+        }
+
+        function createBall() {
+            ball = createVoxelBox(2, 2, 2, COLORS.white);
+            scene.add(ball);
+            resetBall();
+        }
+
+        function resetBall() {
+            ball.position.set(0, 0, 0);
+            const dirX = (Math.random() - 0.5) * 0.8;
+            const dirZ = Math.random() < 0.5 ? 0.8 : -0.8;
+            ballVel.set(dirX, 0, dirZ).normalize().multiplyScalar(0.8);
+        }
+
+        function startGame() {
+            if (p1Score >= MAX_SCORE || p2Score >= MAX_SCORE) return;
+            gameActive = true;
+            document.getElementById('status-text').style.display = 'none';
+        }
+        
+        function resetGame() {
+            p1Score = 0;
+            p2Score = 0;
+            updateScore();
+            resetBall();
+            startGame();
+        }
+
+        function updateScore() {
+            document.getElementById('p1-score').innerText = p1Score;
+            document.getElementById('p2-score').innerText = p2Score;
+        }
+
+        function gameOver(winner) {
+            gameActive = false;
+            const text = document.getElementById('status-text');
+            text.innerHTML = (winner === 1 ? "<span style='color:#00E436'>YOU WIN!</span>" : "<span style='color:#FF004D'>BOT WINS!</span>") + "<br>PRESS SPACE";
+            text.style.display = 'block';
+        }
+
+        function createParticle(pos, color) {
+            const geo = new THREE.BoxGeometry(0.8, 0.8, 0.8);
+            const mat = new THREE.MeshBasicMaterial({ color: color });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.copy(pos);
+            
+            const vel = new THREE.Vector3(
+                (Math.random() - 0.5) * 1.5,
+                (Math.random() - 0.5) * 1.5,
+                (Math.random() - 0.5) * 1.5
+            );
+            
+            scene.add(mesh);
+            particles.push({ mesh, vel, life: 1.0 });
+        }
+
+        function updateParticles() {
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.life -= 0.05;
+                if (p.life <= 0) {
+                    scene.remove(p.mesh);
+                    particles.splice(i, 1);
+                    continue;
+                }
+                p.mesh.position.add(p.vel);
+                p.mesh.scale.setScalar(p.life);
+                p.mesh.rotation.x += 0.1;
+                p.mesh.rotation.y += 0.1;
+            }
+        }
+
+        function animate() {
+            updateParticles();
+            
+            if (gameActive && Math.random() < 0.3) {
+                createParticle(ball.position, COLORS.white);
+            }
+
+            if (gameActive) {
+                if (keys.ArrowLeft && paddle1.position.x > -COURT_WIDTH/2 + PADDLE_WIDTH/2 + 1) {
+                    paddle1.position.x -= 1.0;
+                }
+                if (keys.ArrowRight && paddle1.position.x < COURT_WIDTH/2 - PADDLE_WIDTH/2 - 1) {
+                    paddle1.position.x += 1.0;
+                }
+
+                if (ballVel.z < 0) { 
+                    
+                    const targetX = ball.position.x;
+                    const diff = targetX - paddle2.position.x;
+                    
+                    if (Math.abs(diff) > 2.0) {
+                        paddle2.position.x += Math.sign(diff) * 0.45; 
+                    }
+                }
+                paddle2.position.x = Math.max(-COURT_WIDTH/2 + PADDLE_WIDTH/2 + 1, Math.min(COURT_WIDTH/2 - PADDLE_WIDTH/2 - 1, paddle2.position.x));
+
+                ball.position.add(ballVel);
+
+                if (ball.position.x <= -COURT_WIDTH/2 + 2 || ball.position.x >= COURT_WIDTH/2 - 2) {
+                    ballVel.x *= -1;
+                    ballVel.z += (Math.random() - 0.5) * 0.1;
+                }
+
+                if (ball.position.z > paddle1.position.z - PADDLE_DEPTH/2 - 1 && 
+                    ball.position.z < paddle1.position.z + PADDLE_DEPTH/2 + 1) {
+                    
+                    if (ball.position.x > paddle1.position.x - PADDLE_WIDTH/2 - 1 &&
+                        ball.position.x < paddle1.position.x + PADDLE_WIDTH/2 + 1) {
+                        
+                        if (ballVel.z > 0) {
+                            ballVel.z *= -1.05;
+                            ballVel.x += (ball.position.x - paddle1.position.x) * 0.1;
+                            ball.position.z = paddle1.position.z - PADDLE_DEPTH/2 - 1.1;
+                            
+                            for(let k=0; k<5; k++) createParticle(ball.position, COLORS.neonGreen);
+                        }
+                    }
+                }
+
+                if (ball.position.z < paddle2.position.z + PADDLE_DEPTH/2 + 1 && 
+                    ball.position.z > paddle2.position.z - PADDLE_DEPTH/2 - 1) {
+                    
+                    if (ball.position.x > paddle2.position.x - PADDLE_WIDTH/2 - 1 &&
+                        ball.position.x < paddle2.position.x + PADDLE_WIDTH/2 + 1) {
+                        
+                        if (ballVel.z < 0) {
+                            ballVel.z *= -1.05;
+                            ballVel.x += (ball.position.x - paddle2.position.x) * 0.1;
+                            ball.position.z = paddle2.position.z + PADDLE_DEPTH/2 + 1.1;
+
+                            for(let k=0; k<5; k++) createParticle(ball.position, COLORS.neonPink);
+                        }
+                    }
+                }
+
+                if (ball.position.z > COURT_LENGTH/2 + 5) {
+                    p2Score++;
+                    updateScore();
+                    if (p2Score >= MAX_SCORE) gameOver(2);
+                    else resetBall();
+                } else if (ball.position.z < -COURT_LENGTH/2 - 5) {
+                    p1Score++;
+                    updateScore();
+                    if (p1Score >= MAX_SCORE) gameOver(1);
+                    else resetBall();
+                }
+                
+                const speed = ballVel.length();
+                if (speed > 2.5) ballVel.normalize().multiplyScalar(2.5);
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        init();
+    </script>
+</body>
+</html>

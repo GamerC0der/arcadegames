@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Snake</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <style>
+        body {
+            background-color: #000;
+            margin: 0;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            user-select: none;
+        }
+        #game-container {
+            position: relative;
+            width: 512px;
+            height: 512px;
+        }
+        canvas {
+            width: 100%;
+            height: 100%;
+            image-rendering: pixelated;
+            box-shadow: 0 0 20px rgba(0, 228, 54, 0.2);
+        }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 0;
+            width: 100%;
+            text-align: center;
+            pointer-events: none;
+            z-index: 10;
+        }
+        .score {
+            font-family: 'Press Start 2P', cursive;
+            font-size: 24px;
+            color: #00E436;
+            text-shadow: 2px 2px #000;
+        }
+        #status-text {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-family: 'Press Start 2P', cursive;
+            color: #fff;
+            text-align: center;
+            width: 100%;
+            pointer-events: none;
+            line-height: 2;
+            text-shadow: 2px 2px #000;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <div id="ui">
+            <div id="score" class="score">SCORE: 0</div>
+        </div>
+        <div id="status-text">
+            PRESS SPACE TO START<br>
+            ARROW KEYS TO MOVE
+        </div>
+    </div>
+    <script type="module">
+        import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+
+        const SCENE_WIDTH = 128;
+        const SCENE_HEIGHT = 128;
+        
+        const COLORS = {
+            green: 0x00E436,
+            red: 0xFF004D,
+            darkGreen: 0x008751,
+            dark: 0x1D2B53,
+            black: 0x000000,
+            white: 0xFFFFFF,
+            orange: 0xFFA300,
+            purple: 0x83769C,
+            yellow: 0xFFEC27,
+            blue: 0x29ADFF,
+            pink: 0xFF77A8,
+            brown: 0xAB5236
+        };
+
+        const soundManager = {
+            ctx: null,
+            init: function() {
+                if (!this.ctx) {
+                    this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+                    this.startMusic();
+                }
+                if (this.ctx.state === 'suspended') {
+                    this.ctx.resume();
+                }
+            },
+            playTone: function(freq, type, duration, vol=0.1) {
+                if (!this.ctx) return;
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = type;
+                osc.frequency.setValueAtTime(freq, this.ctx.currentTime);
+                gain.gain.setValueAtTime(vol, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + duration);
+                osc.connect(gain);
+                gain.connect(this.ctx.destination);
+                osc.start();
+                osc.stop(this.ctx.currentTime + duration);
+            },
+            playEat: function() {
+                this.playTone(600, 'square', 0.1);
+                setTimeout(() => this.playTone(800, 'square', 0.1), 50);
+            },
+            playDie: function() {
+                this.playTone(200, 'sawtooth', 0.3);
+                setTimeout(() => this.playTone(150, 'sawtooth', 0.3), 100);
+                setTimeout(() => this.playTone(100, 'sawtooth', 0.4), 200);
+            },
+            startMusic: function() {
+                let note = 0;
+                const notes = [110, 110, 130, 110, 146, 130, 110, 164];
+                setInterval(() => {
+                    if (gameActive && this.ctx) {
+                        this.playTone(notes[note % notes.length], 'triangle', 0.1, 0.05);
+                        note++;
+                    }
+                }, 200);
+            }
+        };
+
+        const FRUIT_TYPES = [
+            { name: 'Apple', color: COLORS.red, type: 'round' },
+            { name: 'Orange', color: COLORS.orange, type: 'round' },
+            { name: 'Grape', color: COLORS.purple, type: 'cluster' },
+            { name: 'Banana', color: COLORS.yellow, type: 'long' },
+            { name: 'Cherry', color: COLORS.red, type: 'double' },
+            { name: 'Lemon', color: COLORS.yellow, type: 'round' },
+            { name: 'Blueberry', color: COLORS.blue, type: 'small' },
+            { name: 'Watermelon', color: COLORS.green, type: 'box' },
+            { name: 'Strawberry', color: COLORS.pink, type: 'tapered' },
+            { name: 'Coconut', color: COLORS.brown, type: 'round' }
+        ];
+
+        let scene, camera, renderer;
+        let snake = []; 
+        let currentFruitMesh;
+        let currentFruitData = {};
+        let score = 0;
+        let gameActive = false;
+        let lastTime = 0;
+        let moveTimer = 0;
+        let moveInterval = 150;
+        
+        const GRID_SIZE = 20;
+        const TILE_SIZE = 4;
+        const OFFSET = (GRID_SIZE * TILE_SIZE) / 2 - TILE_SIZE/2;
+        
+        let direction = { x: 1, y: 0 };
+        let nextDirection = { x: 1, y: 0 };
+        let snakePositions = [];
+
+        function init() {
+            const container = document.getElementById('game-container');
+            
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(COLORS.black);
+
+            camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000); 
+            camera.position.set(0, 90, 70); 
+            camera.lookAt(0, -10, 0); 
+
+            renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+            renderer.setSize(SCENE_WIDTH, SCENE_HEIGHT, false);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            container.appendChild(renderer.domElement);
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+            scene.add(ambientLight);
+            
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(20, 50, 20);
+            dirLight.castShadow = true;
+            dirLight.shadow.mapSize.width = 1024;
+            dirLight.shadow.mapSize.height = 1024;
+            dirLight.shadow.camera.near = 0.5;
+            dirLight.shadow.camera.far = 150;
+            dirLight.shadow.camera.left = -60;
+            dirLight.shadow.camera.right = 60;
+            dirLight.shadow.camera.top = 60;
+            dirLight.shadow.camera.bottom = -60;
+            scene.add(dirLight);
+
+            createBoard();
+            
+            resetGameLogic();
+            createSnake();
+            spawnFruit();
+
+            window.addEventListener('keydown', (e) => {
+                if(e.code === 'ArrowUp' && direction.y === 0) nextDirection = { x: 0, y: -1 };
+                if(e.code === 'ArrowDown' && direction.y === 0) nextDirection = { x: 0, y: 1 };
+                if(e.code === 'ArrowLeft' && direction.x === 0) nextDirection = { x: -1, y: 0 };
+                if(e.code === 'ArrowRight' && direction.x === 0) nextDirection = { x: 1, y: 0 };
+                
+                if(e.code === 'Space') {
+                    soundManager.init();
+                    if (!gameActive) {
+                        startGame();
+                    }
+                }
+                if(e.code === 'Escape') {
+                    window.location.href = 'menu.html';
+                }
+            });
+
+            renderer.setAnimationLoop(animate);
+        }
+
+        function createVoxelBox(width, height, depth, color) {
+            const mat = new THREE.MeshLambertMaterial({ color: color });
+            const mesh = new THREE.Mesh(
+                new THREE.BoxGeometry(width, height, depth),
+                mat
+            );
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            return mesh;
+        }
+
+        function createBoard() {
+            const group = new THREE.Group();
+            const geo = new THREE.BoxGeometry(TILE_SIZE, 1, TILE_SIZE);
+            const matDark = new THREE.MeshLambertMaterial({ color: 0x111111 });
+            const matLight = new THREE.MeshLambertMaterial({ color: 0x222222 });
+
+            for(let x=0; x<GRID_SIZE; x++) {
+                for(let y=0; y<GRID_SIZE; y++) {
+                    const mat = (x+y)%2 === 0 ? matDark : matLight;
+                    const tile = new THREE.Mesh(geo, mat);
+                    tile.position.set(
+                        (x * TILE_SIZE) - OFFSET, 
+                        -2.5, 
+                        (y * TILE_SIZE) - OFFSET
+                    );
+                    tile.receiveShadow = true;
+                    group.add(tile);
+                }
+            }
+            scene.add(group);
+
+            const wallH = 4;
+            const wallThick = 2;
+            const wallGeo = new THREE.BoxGeometry(GRID_SIZE * TILE_SIZE + wallThick*2, wallH, wallThick);
+            const wallMat = new THREE.MeshLambertMaterial({ color: COLORS.green, emissive: 0x004400 }); 
+            
+            const top = new THREE.Mesh(wallGeo, wallMat);
+            top.position.set(0, 0, -GRID_SIZE * TILE_SIZE / 2 - wallThick/2);
+            top.castShadow = true;
+            top.receiveShadow = true;
+            scene.add(top);
+
+            const bottom = new THREE.Mesh(wallGeo, wallMat);
+            bottom.position.set(0, 0, GRID_SIZE * TILE_SIZE / 2 + wallThick/2);
+            bottom.castShadow = true;
+            bottom.receiveShadow = true;
+            scene.add(bottom);
+
+            const sideGeo = new THREE.BoxGeometry(wallThick, wallH, GRID_SIZE * TILE_SIZE + wallThick*2);
+            const left = new THREE.Mesh(sideGeo, wallMat);
+            left.position.set(-GRID_SIZE * TILE_SIZE / 2 - wallThick/2, 0, 0);
+            left.castShadow = true;
+            left.receiveShadow = true;
+            scene.add(left);
+
+            const right = new THREE.Mesh(sideGeo, wallMat);
+            right.position.set(GRID_SIZE * TILE_SIZE / 2 + wallThick/2, 0, 0);
+            right.castShadow = true;
+            right.receiveShadow = true;
+            scene.add(right);
+        }
+
+        function resetGameLogic() {
+            snakePositions = [
+                { x: 5, y: 10 },
+                { x: 4, y: 10 },
+                { x: 3, y: 10 }
+            ];
+            direction = { x: 1, y: 0 };
+            nextDirection = { x: 1, y: 0 };
+            score = 0;
+            moveInterval = 150;
+            document.getElementById('score').innerText = 'SCORE: ' + score;
+        }
+
+        function createSnake() {
+            snake.forEach(s => scene.remove(s));
+            snake = [];
+
+            snakePositions.forEach(pos => {
+                const mesh = createVoxelBox(TILE_SIZE - 0.2, TILE_SIZE - 0.2, TILE_SIZE - 0.2, COLORS.green);
+                mesh.position.set(
+                    (pos.x * TILE_SIZE) - OFFSET,
+                    0,
+                    (pos.y * TILE_SIZE) - OFFSET
+                );
+                scene.add(mesh);
+                snake.push(mesh);
+            });
+            
+            snake[0].material.color.setHex(COLORS.green); 
+            
+            const eyeGeo = new THREE.BoxGeometry(0.5, 0.5, 0.5);
+            const eyeMat = new THREE.MeshBasicMaterial({ color: COLORS.white });
+            
+            const leftEye = new THREE.Mesh(eyeGeo, eyeMat);
+            leftEye.position.set(-1, 0.5, -1);
+            snake[0].add(leftEye);
+
+            const rightEye = new THREE.Mesh(eyeGeo, eyeMat);
+            rightEye.position.set(1, 0.5, -1);
+            snake[0].add(rightEye);
+            
+            for(let i=1; i<snake.length; i++) snake[i].material.color.setHex(COLORS.darkGreen);
+        }
+
+        function spawnFruit() {
+            if (currentFruitMesh) scene.remove(currentFruitMesh);
+            
+            let valid = false;
+            let ax, ay;
+            while(!valid) {
+                ax = Math.floor(Math.random() * GRID_SIZE);
+                ay = Math.floor(Math.random() * GRID_SIZE);
+                valid = !snakePositions.some(p => p.x === ax && p.y === ay);
+            }
+
+            const type = FRUIT_TYPES[Math.floor(Math.random() * FRUIT_TYPES.length)];
+            currentFruitData = { gridX: ax, gridY: ay, type: type };
+
+            const group = new THREE.Group();
+            const mainSize = TILE_SIZE - 1.5;
+            
+            let mesh;
+            if (type.type === 'round' || type.type === 'small') {
+                mesh = createVoxelBox(mainSize, mainSize, mainSize, type.color);
+            } else if (type.type === 'long') {
+                mesh = createVoxelBox(mainSize, mainSize/2, mainSize/2, type.color);
+                mesh.rotation.z = Math.PI / 4;
+            } else if (type.type === 'cluster') {
+                mesh = new THREE.Group();
+                const s = mainSize / 2;
+                const b1 = createVoxelBox(s, s, s, type.color);
+                const b2 = createVoxelBox(s, s, s, type.color);
+                b2.position.set(s/2, -s/2, 0);
+                const b3 = createVoxelBox(s, s, s, type.color);
+                b3.position.set(-s/2, -s/2, 0);
+                const b4 = createVoxelBox(s, s, s, type.color);
+                b4.position.set(0, -s, 0);
+                mesh.add(b1, b2, b3, b4);
+            } else if (type.type === 'double') {
+                mesh = new THREE.Group();
+                const s = mainSize / 1.5;
+                const c1 = createVoxelBox(s, s, s, type.color);
+                c1.position.x = -s/2;
+                const c2 = createVoxelBox(s, s, s, type.color);
+                c2.position.x = s/2;
+                c2.position.y = -s/4;
+                mesh.add(c1, c2);
+            } else {
+                mesh = createVoxelBox(mainSize, mainSize, mainSize, type.color);
+            }
+
+            const stem = new THREE.Mesh(
+                new THREE.BoxGeometry(0.5, 1, 0.5),
+                new THREE.MeshBasicMaterial({color: COLORS.green})
+            );
+            stem.position.y = mainSize/2;
+            mesh.add(stem);
+
+            group.add(mesh);
+            group.position.set(
+                (ax * TILE_SIZE) - OFFSET,
+                0,
+                (ay * TILE_SIZE) - OFFSET
+            );
+
+            scene.add(group);
+            currentFruitMesh = group;
+        }
+
+        function startGame() {
+            resetGameLogic();
+            createSnake();
+            spawnFruit();
+            gameActive = true;
+            document.getElementById('status-text').style.display = 'none';
+        }
+
+        function gameOver() {
+            gameActive = false;
+            soundManager.playDie();
+            const text = document.getElementById('status-text');
+            text.innerHTML = "GAME OVER<br>SCORE: " + score + "<br>PRESS SPACE";
+            text.style.display = 'block';
+        }
+
+        function updateSnakeVisuals() {
+            while(snake.length < snakePositions.length) {
+                const mesh = createVoxelBox(TILE_SIZE - 0.2, TILE_SIZE - 0.2, TILE_SIZE - 0.2, COLORS.darkGreen);
+                scene.add(mesh);
+                snake.push(mesh);
+            }
+
+            snakePositions.forEach((pos, i) => {
+                snake[i].position.set(
+                    (pos.x * TILE_SIZE) - OFFSET,
+                    0,
+                    (pos.y * TILE_SIZE) - OFFSET
+                );
+            });
+        }
+
+        function animate(time) {
+            renderer.render(scene, camera);
+
+            if (!gameActive) {
+                if (currentFruitMesh) currentFruitMesh.rotation.y += 0.05;
+                return;
+            }
+
+            if (currentFruitMesh) {
+                currentFruitMesh.position.y = Math.sin(time * 0.005) * 1;
+                currentFruitMesh.rotation.y += 0.02;
+            }
+
+            if (time - lastTime > moveInterval) {
+                lastTime = time;
+                
+                direction = nextDirection;
+                
+                const head = snakePositions[0];
+                const newHead = { x: head.x + direction.x, y: head.y + direction.y };
+
+                if (newHead.x < 0 || newHead.x >= GRID_SIZE || newHead.y < 0 || newHead.y >= GRID_SIZE) {
+                    gameOver();
+                    return;
+                }
+                
+                if (snakePositions.some((p, i) => i !== snakePositions.length - 1 && p.x === newHead.x && p.y === newHead.y)) {
+                    gameOver();
+                    return;
+                }
+
+                snakePositions.unshift(newHead);
+                
+                if (newHead.x === currentFruitData.gridX && newHead.y === currentFruitData.gridY) {
+                    soundManager.playEat();
+                    score++;
+                    document.getElementById('score').innerText = 'SCORE: ' + score;
+                    moveInterval = Math.max(50, moveInterval - 2);
+                    
+                    spawnFruit();
+                } else {
+                    snakePositions.pop();
+                }
+
+                updateSnakeVisuals();
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>
