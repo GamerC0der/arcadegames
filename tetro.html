@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Tetro 3D</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <style>
+        body {
+            background-color: #000;
+            margin: 0;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            user-select: none;
+        }
+        #game-container {
+            position: relative;
+            width: 512px;
+            height: 512px;
+        }
+        canvas {
+            width: 100%;
+            height: 100%;
+            image-rendering: pixelated;
+            box-shadow: 0 0 20px rgba(255, 0, 77, 0.2);
+        }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 0;
+            width: 100%;
+            text-align: center;
+            pointer-events: none;
+            z-index: 10;
+        }
+        .score {
+            font-family: 'Press Start 2P', cursive;
+            font-size: 20px;
+            color: #FF77A8;
+            text-shadow: 2px 2px #000;
+        }
+        #status-text {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-family: 'Press Start 2P', cursive;
+            color: #fff;
+            text-align: center;
+            width: 100%;
+            pointer-events: none;
+            line-height: 2;
+            text-shadow: 2px 2px #000;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <div id="ui">
+            <div id="score" class="score">LINES: 0</div>
+        </div>
+        <div id="status-text">
+            PRESS SPACE TO START<br>
+            ARROWS TO MOVE<br>
+            UP TO ROTATE<br>
+            DOWN TO DROP
+        </div>
+    </div>
+    <script type="module">
+        import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+
+        const SCENE_WIDTH = 128;
+        const SCENE_HEIGHT = 128;
+        const GRID_W = 10;
+        const GRID_H = 20;
+        const BLOCK_SIZE = 4;
+
+        const COLORS = [
+            0x29ADFF, 0xFF004D, 0x00E436, 0xFFA300, 
+            0xFFEC27, 0x83769C, 0xFF77A8, 0x7E2553
+        ];
+
+        const SHAPES = [
+            [[1,1,1,1]], // I
+            [[1,1,1],[0,1,0]], // T
+            [[1,1,1],[1,0,0]], // L
+            [[1,1,1],[0,0,1]], // J
+            [[1,1],[1,1]], // O
+            [[1,1,0],[0,1,1]], // S
+            [[0,1,1],[1,1,0]]  // Z
+        ];
+
+        let scene, camera, renderer;
+        let gameActive = false;
+        let score = 0;
+        let lastTime = 0;
+        let dropTimer = 0;
+        let dropInterval = 1000;
+
+        let grid = [];
+        let currentPiece = null;
+        let ghostPiece = null;
+        let staticBlocks = new THREE.Group();
+
+        const soundManager = {
+            ctx: null,
+            init() {
+                if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+            },
+            playTone(freq, type, duration, vol=0.1) {
+                if (!this.ctx) return;
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = type;
+                osc.frequency.setValueAtTime(freq, this.ctx.currentTime);
+                gain.gain.setValueAtTime(vol, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + duration);
+                osc.connect(gain);
+                gain.connect(this.ctx.destination);
+                osc.start();
+                osc.stop(this.ctx.currentTime + duration);
+            }
+        };
+
+        function init() {
+            const container = document.getElementById('game-container');
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x050505);
+
+            camera = new THREE.PerspectiveCamera(50, 1, 0.1, 1000);
+            camera.position.set(0, 20, 100);
+            camera.lookAt(0, 0, 0);
+
+            renderer = new THREE.WebGLRenderer({ antialias: false });
+            renderer.setSize(SCENE_WIDTH, SCENE_HEIGHT, false);
+            container.appendChild(renderer.domElement);
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+            scene.add(ambientLight);
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(20, 50, 50);
+            scene.add(dirLight);
+
+            createGridFrame();
+            scene.add(staticBlocks);
+
+            window.addEventListener('keydown', handleInput);
+            renderer.setAnimationLoop(animate);
+        }
+
+        function createGridFrame() {
+            const frame = new THREE.Group();
+            const mat = new THREE.MeshBasicMaterial({ color: 0x222222, transparent: true, opacity: 0.5 });
+            const geo = new THREE.BoxGeometry(GRID_W * BLOCK_SIZE, GRID_H * BLOCK_SIZE, 2);
+            const bg = new THREE.Mesh(geo, mat);
+            bg.position.z = -BLOCK_SIZE;
+            frame.add(bg);
+
+            const lineMat = new THREE.LineBasicMaterial({ color: 0x444444 });
+            for(let i=0; i<=GRID_W; i++) {
+                const points = [
+                    new THREE.Vector3((i - GRID_W/2) * BLOCK_SIZE, -GRID_H/2 * BLOCK_SIZE, 0),
+                    new THREE.Vector3((i - GRID_W/2) * BLOCK_SIZE, GRID_H/2 * BLOCK_SIZE, 0)
+                ];
+                const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
+                frame.add(new THREE.Line(lineGeo, lineMat));
+            }
+            for(let i=0; i<=GRID_H; i++) {
+                const points = [
+                    new THREE.Vector3(-GRID_W/2 * BLOCK_SIZE, (i - GRID_H/2) * BLOCK_SIZE, 0),
+                    new THREE.Vector3(GRID_W/2 * BLOCK_SIZE, (i - GRID_H/2) * BLOCK_SIZE, 0)
+                ];
+                const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
+                frame.add(new THREE.Line(lineGeo, lineMat));
+            }
+            scene.add(frame);
+        }
+
+        function spawnPiece() {
+            const id = Math.floor(Math.random() * SHAPES.length);
+            const shape = SHAPES[id];
+            const color = COLORS[id];
+            
+            currentPiece = {
+                shape: shape,
+                color: color,
+                x: Math.floor(GRID_W / 2) - Math.floor(shape[0].length / 2),
+                y: GRID_H - 1,
+                mesh: new THREE.Group()
+            };
+
+            updatePieceMesh(currentPiece);
+            scene.add(currentPiece.mesh);
+
+            if (checkCollision(currentPiece.x, currentPiece.y, currentPiece.shape)) {
+                gameOver();
+            }
+        }
+
+        function updatePieceMesh(piece) {
+            while(piece.mesh.children.length > 0) piece.mesh.remove(piece.mesh.children[0]);
+            
+            const geo = new THREE.BoxGeometry(BLOCK_SIZE - 0.4, BLOCK_SIZE - 0.4, BLOCK_SIZE - 0.4);
+            const mat = new THREE.MeshLambertMaterial({ color: piece.color });
+            
+            piece.shape.forEach((row, dy) => {
+                row.forEach((val, dx) => {
+                    if (val) {
+                        const block = new THREE.Mesh(geo, mat);
+                        block.position.set(dx * BLOCK_SIZE, -dy * BLOCK_SIZE, 0);
+                        piece.mesh.add(block);
+                    }
+                });
+            });
+            updatePiecePos(piece);
+        }
+
+        function updatePiecePos(piece) {
+            piece.mesh.position.set(
+                (piece.x - GRID_W/2) * BLOCK_SIZE,
+                (piece.y - GRID_H/2) * BLOCK_SIZE,
+                0
+            );
+        }
+
+        function checkCollision(x, y, shape) {
+            for(let dy=0; dy<shape.length; dy++) {
+                for(let dx=0; dx<shape[dy].length; dx++) {
+                    if (shape[dy][dx]) {
+                        const nx = x + dx;
+                        const ny = y - dy;
+                        if (nx < 0 || nx >= GRID_W || ny < 0) return true;
+                        if (grid[ny] && grid[ny][nx]) return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        function lockPiece() {
+            currentPiece.shape.forEach((row, dy) => {
+                row.forEach((val, dx) => {
+                    if (val) {
+                        const nx = currentPiece.x + dx;
+                        const ny = currentPiece.y - dy;
+                        if (!grid[ny]) grid[ny] = [];
+                        grid[ny][nx] = currentPiece.color;
+                        
+                        const geo = new THREE.BoxGeometry(BLOCK_SIZE - 0.4, BLOCK_SIZE - 0.4, BLOCK_SIZE - 0.4);
+                        const mat = new THREE.MeshLambertMaterial({ color: currentPiece.color });
+                        const block = new THREE.Mesh(geo, mat);
+                        block.position.set(
+                            (nx - GRID_W/2) * BLOCK_SIZE,
+                            (ny - GRID_H/2) * BLOCK_SIZE,
+                            0
+                        );
+                        staticBlocks.add(block);
+                    }
+                });
+            });
+            
+            scene.remove(currentPiece.mesh);
+            checkLines();
+            spawnPiece();
+            soundManager.playTone(200, 'square', 0.1);
+        }
+
+        function checkLines() {
+            let linesCleared = 0;
+            for(let y=0; y<GRID_H; y++) {
+                if (grid[y] && Object.keys(grid[y]).length === GRID_W) {
+                    grid.splice(y, 1);
+                    linesCleared++;
+                    y--;
+                }
+            }
+            if (linesCleared > 0) {
+                score += linesCleared;
+                document.getElementById('score').innerText = 'LINES: ' + score;
+                redrawStaticBlocks();
+                soundManager.playTone(400 + linesCleared * 100, 'square', 0.2);
+            }
+        }
+
+        function redrawStaticBlocks() {
+            while(staticBlocks.children.length > 0) staticBlocks.remove(staticBlocks.children[0]);
+            grid.forEach((row, y) => {
+                row.forEach((color, x) => {
+                    if (color) {
+                        const geo = new THREE.BoxGeometry(BLOCK_SIZE - 0.4, BLOCK_SIZE - 0.4, BLOCK_SIZE - 0.4);
+                        const mat = new THREE.MeshLambertMaterial({ color: color });
+                        const block = new THREE.Mesh(geo, mat);
+                        block.position.set(
+                            (x - GRID_W/2) * BLOCK_SIZE,
+                            (y - GRID_H/2) * BLOCK_SIZE,
+                            0
+                        );
+                        staticBlocks.add(block);
+                    }
+                });
+            });
+        }
+
+        function rotatePiece() {
+            const newShape = [];
+            for(let x=0; x<currentPiece.shape[0].length; x++) {
+                newShape[x] = [];
+                for(let y=currentPiece.shape.length-1; y>=0; y--) {
+                    newShape[x].push(currentPiece.shape[y][x]);
+                }
+            }
+            if (!checkCollision(currentPiece.x, currentPiece.y, newShape)) {
+                currentPiece.shape = newShape;
+                updatePieceMesh(currentPiece);
+                soundManager.playTone(300, 'sine', 0.05);
+            }
+        }
+
+        function handleInput(e) {
+            if (e.code === 'Space') {
+                soundManager.init();
+                if (!gameActive) startGame();
+            }
+            if (!gameActive) return;
+
+            if (e.code === 'ArrowLeft') {
+                if (!checkCollision(currentPiece.x - 1, currentPiece.y, currentPiece.shape)) {
+                    currentPiece.x--;
+                    updatePiecePos(currentPiece);
+                }
+            }
+            if (e.code === 'ArrowRight') {
+                if (!checkCollision(currentPiece.x + 1, currentPiece.y, currentPiece.shape)) {
+                    currentPiece.x++;
+                    updatePiecePos(currentPiece);
+                }
+            }
+            if (e.code === 'ArrowDown') {
+                if (!checkCollision(currentPiece.x, currentPiece.y - 1, currentPiece.shape)) {
+                    currentPiece.y--;
+                    updatePiecePos(currentPiece);
+                }
+            }
+            if (e.code === 'ArrowUp') {
+                rotatePiece();
+            }
+            if (e.code === 'Escape') window.location.href = 'menu.html';
+        }
+
+        function startGame() {
+            grid = [];
+            while(staticBlocks.children.length > 0) staticBlocks.remove(staticBlocks.children[0]);
+            score = 0;
+            document.getElementById('score').innerText = 'LINES: 0';
+            document.getElementById('status-text').style.display = 'none';
+            gameActive = true;
+            spawnPiece();
+        }
+
+        function gameOver() {
+            gameActive = false;
+            document.getElementById('status-text').style.display = 'block';
+            document.getElementById('status-text').innerHTML = 'GAME OVER<br>LINES: ' + score + '<br>PRESS SPACE';
+        }
+
+        function animate(time) {
+            if (gameActive) {
+                if (time - lastTime > dropInterval) {
+                    if (!checkCollision(currentPiece.x, currentPiece.y - 1, currentPiece.shape)) {
+                        currentPiece.y--;
+                        updatePiecePos(currentPiece);
+                    } else {
+                        lockPiece();
+                    }
+                    lastTime = time;
+                }
+            }
+            
+            staticBlocks.rotation.y = Math.sin(time * 0.001) * 0.1;
+            if (currentPiece) currentPiece.mesh.rotation.y = staticBlocks.rotation.y;
+            
+            renderer.render(scene, camera);
+        }
+
+        init();
+    </script>
+</body>
+</html>
