@@ -66,7 +66,6 @@
         <div id="status-text">
             PRESS SPACE TO START<br>
             ARROWS TO MOVE<br>
-            DOWN TO BRAKE<br>
             SPACE TO SHOOT
         </div>
     </div>
@@ -403,21 +402,24 @@
             renderer.render(scene, camera);
             if (!gameActive) return;
 
-            if (keys.ArrowLeft) ship.rotation.y += 0.15;
-            if (keys.ArrowRight) ship.rotation.y -= 0.15;
-            if (keys.ArrowUp) {
-                const thrust = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), ship.rotation.y);
-                thrust.multiplyScalar(0.05);
-                ship.userData.velocity.add(thrust);
+            let moveDir = new THREE.Vector3(0, 0, 0);
+            if (keys.ArrowUp) moveDir.z -= 1;
+            if (keys.ArrowDown) moveDir.z += 1;
+            if (keys.ArrowLeft) moveDir.x -= 1;
+            if (keys.ArrowRight) moveDir.x += 1;
+
+            if (moveDir.length() > 0) {
+                moveDir.normalize().multiplyScalar(0.8);
+                ship.userData.velocity.copy(moveDir);
+                ship.rotation.y = Math.atan2(moveDir.x, moveDir.z) + Math.PI;
                 
                 if (Math.random() > 0.5) {
                     const p = new THREE.Vector3(0, 0, 1.5).applyAxisAngle(new THREE.Vector3(0, 1, 0), ship.rotation.y).add(ship.position);
                     createExplosion(p, 1, COLORS.orange);
                 }
                 soundManager.playThrust();
-            }
-            if (keys.ArrowDown) {
-                ship.userData.velocity.multiplyScalar(0.9);
+            } else {
+                ship.userData.velocity.multiplyScalar(0.8);
             }
 
             if (keys.Space && time - lastShootTime > 150) {
@@ -426,7 +428,6 @@
             }
 
             ship.position.add(ship.userData.velocity);
-            ship.userData.velocity.multiplyScalar(0.95);
             wrapObject(ship);
 
             for(let i=bullets.length-1; i>=0; i--) {
